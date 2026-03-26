@@ -1,0 +1,540 @@
+"""
+MatrixVis - 线性代数AI可视化求解系统
+主入口文件
+技术栈：Python + Streamlit + NumPy + Plotly + PaddleOCR + NetworkX
+作者：海南师范大学参赛团队
+版本：1.0.0
+"""
+
+import streamlit as st
+import numpy as np
+import pandas as pd
+import json
+from PIL import Image
+import sys
+import os
+
+# 添加项目路径
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from core.matrix_ops import (
+    compute_determinant_lu, compute_inverse_gauss_jordan,
+    compute_eigenvalue_qr, solve_linear_system, compute_rank
+)
+from viz.plotly_charts import (
+    plot_matrix_heatmap, plot_lu_animation, plot_eigenvalue_geometry,
+    plot_convergence_curve, plot_gauss_jordan_animation
+)
+from utils.latex_export import generate_latex_report, generate_pdf_report
+
+# 可选模块 - 带错误处理
+OCR_AVAILABLE = False
+KNOWLEDGE_GRAPH_AVAILABLE = False
+SMART_TUTOR_AVAILABLE = False
+
+try:
+    from ai.ocr_engine import ai_matrix_recognition, parse_ocr_to_matrix
+    OCR_AVAILABLE = True
+except Exception as e:
+    pass
+
+try:
+    from ai.knowledge_graph import build_knowledge_graph, recommend_learning_path, visualize_knowledge_graph
+    KNOWLEDGE_GRAPH_AVAILABLE = True
+except Exception as e:
+    pass
+
+try:
+    from ai.smart_tutor import generate_step_explanation, smart_tutor_mode, analyze_user_habits
+    SMART_TUTOR_AVAILABLE = True
+except Exception as e:
+    pass
+
+# 页面配置
+st.set_page_config(
+    page_title="MatrixVis - 线性代数AI可视化求解系统",
+    page_icon="🔢",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# CSS样式注入
+st.markdown("""
+<style>
+    .main {background-color: #fafafa;}
+    .stTabs [data-baseweb="tab-list"] {gap: 8px;}
+    .stTabs [data-baseweb="tab"] {
+        background-color: #e3f2fd;
+        border-radius: 4px 4px 0 0;
+        padding: 8px 16px;
+        color: #1a237e;
+        font-weight: 500;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #1a237e !important;
+        color: white !important;
+    }
+    .highlight-box {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 20px;
+        border-radius: 10px;
+        color: white;
+    }
+    .ai-badge {
+        background: linear-gradient(135deg, #9c27b0, #e1bee7);
+        color: white;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 12px;
+        margin-left: 8px;
+    }
+    .metric-card {
+        background: white;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        text-align: center;
+    }
+    .step-card {
+        background: #f5f5f5;
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 4px solid #1a237e;
+        margin: 10px 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# 初始化session state
+if 'history' not in st.session_state:
+    st.session_state.history = []
+if 'current_matrix' not in st.session_state:
+    st.session_state.current_matrix = None
+if 'knowledge_graph' not in st.session_state:
+    st.session_state.knowledge_graph = build_knowledge_graph()
+if 'user_habits' not in st.session_state:
+    st.session_state.user_habits = {}
+
+def render_header():
+    """渲染页面头部"""
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.title("🔢 MatrixVis")
+        st.markdown("**线性代数AI可视化求解系统** <span class='ai-badge'>AI Powered</span>", unsafe_allow_html=True)
+    with col2:
+        st.image("https://img.icons8.com/color/96/matrix.png", width=80)
+    st.divider()
+
+def render_sidebar():
+    """渲染侧边栏"""
+    with st.sidebar:
+        st.image("https://img.icons8.com/color/96/matrix.png", width=100)
+        st.markdown("### ⚙️ 控制面板")
+        
+        # 模式选择
+        mode = st.radio("📱 输入模式", [
+            "✏️ 手动输入",
+            "📷 AI识图",
+            "📁 文件导入"
+        ], key="input_mode")
+        
+        matrix = None
+        
+        if mode == "✏️ 手动输入":
+            # 矩阵维度选择
+            dim = st.slider("📐 矩阵维度", 2, 10, 3, key="matrix_dim")
+            
+            # 随机生成按钮
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🎲 随机生成", use_container_width=True):
+                    st.session_state.random_matrix = np.random.randint(-10, 11, (dim, dim))
+            with col2:
+                if st.button("🔢 单位矩阵", use_container_width=True):
+                    st.session_state.random_matrix = np.eye(dim, dtype=int)
+            
+            # 矩阵编辑器
+            st.markdown("#### 📝 矩阵编辑器")
+            default_matrix = st.session_state.get('random_matrix', np.zeros((dim, dim)))
+            matrix = st.data_editor(
+                default_matrix,
+                key="matrix_editor",
+                use_container_width=True,
+                num_rows="fixed"
+            )
+            
+        elif mode == "📷 AI识图":
+            # AI识图模块
+            matrix = ai_matrix_recognition()
+            
+        else:  # 文件导入
+            uploaded = st.file_uploader("📁 上传文件", ['csv', 'xlsx', 'txt'])
+            if uploaded:
+                try:
+                    if uploaded.name.endswith('.csv'):
+                        df = pd.read_csv(uploaded, header=None)
+                    else:
+                        df = pd.read_excel(uploaded, header=None)
+                    matrix = df.values.astype(float)
+                    st.success(f"✅ 成功导入 {matrix.shape[0]}×{matrix.shape[1]} 矩阵")
+                except Exception as e:
+                    st.error(f"❌ 导入失败: {str(e)}")
+        
+        st.divider()
+        
+        # 运算类型选择
+        st.markdown("### 🧮 运算类型")
+        calc_type = st.selectbox("选择运算", [
+            "📊 行列式 (LU分解可视化)",
+            "🔄 逆矩阵 (高斯-约当消元)",
+            "⚡ 特征值 (QR迭代+几何解释)",
+            "📐 线性方程组 (完整消元过程)",
+            "🔍 矩阵秩 (行最简型)",
+            "📈 全部运算 (批量计算)"
+        ], key="calc_type")
+        
+        # 高级选项
+        with st.expander("⚙️ 高级选项"):
+            show_steps = st.checkbox("显示详细步骤", value=True)
+            show_viz = st.checkbox("启用可视化", value=True)
+            show_ai_tutor = st.checkbox("AI智能讲解", value=True)
+            precision = st.selectbox("数值精度", ["整数", "2位小数", "4位小数", "科学计数"], index=2)
+        
+        st.divider()
+        
+        # 开始计算按钮
+        if st.button("🚀 开始计算", type="primary", use_container_width=True):
+            if matrix is not None:
+                with st.spinner("🤖 AI计算中..."):
+                    result = perform_calculation(
+                        matrix, calc_type, 
+                        show_steps, show_viz, show_ai_tutor
+                    )
+                    if result:
+                        st.session_state.history.append(result)
+                        st.session_state.current_matrix = matrix
+                        st.session_state.last_result = result
+                        st.balloons()
+            else:
+                st.warning("⚠️ 请先输入矩阵")
+        
+        # 学习模式入口
+        st.divider()
+        if st.button("🎓 进入AI学习模式", use_container_width=True):
+            st.session_state.show_learning_mode = True
+        
+        return matrix, calc_type
+
+def perform_calculation(matrix, calc_type, show_steps, show_viz, show_ai_tutor):
+    """执行计算"""
+    result = {
+        'matrix': matrix,
+        'type': calc_type,
+        'timestamp': pd.Timestamp.now(),
+        'steps': []
+    }
+    
+    try:
+        if "行列式" in calc_type:
+            det_result = compute_determinant_lu(matrix)
+            result['determinant'] = det_result
+            
+            if show_ai_tutor:
+                for i, step in enumerate(det_result.get('steps', [])):
+                    generate_step_explanation('lu_factorization', {
+                        'k': step.get('step', i),
+                        'pivot': step.get('pivot', 0)
+                    })
+            
+        elif "逆矩阵" in calc_type:
+            inv_result = compute_inverse_gauss_jordan(matrix)
+            result['inverse'] = inv_result
+            
+        elif "特征值" in calc_type:
+            eigen_result = compute_eigenvalue_qr(matrix)
+            result['eigenvalues'] = eigen_result
+            
+        elif "线性方程组" in calc_type:
+            # 生成随机b向量用于演示
+            b = np.random.randint(-10, 11, matrix.shape[0])
+            solve_result = solve_linear_system(matrix, b)
+            result['solution'] = solve_result
+            
+        elif "矩阵秩" in calc_type:
+            rank_result = compute_rank(matrix)
+            result['rank'] = rank_result
+            
+        elif "全部运算" in calc_type:
+            # 批量计算所有运算
+            result['determinant'] = compute_determinant_lu(matrix)
+            result['rank'] = compute_rank(matrix)
+            try:
+                result['inverse'] = compute_inverse_gauss_jordan(matrix)
+            except:
+                result['inverse'] = None
+            try:
+                result['eigenvalues'] = compute_eigenvalue_qr(matrix)
+            except:
+                result['eigenvalues'] = None
+        
+        return result
+        
+    except Exception as e:
+        st.error(f"❌ 计算错误: {str(e)}")
+        return None
+
+def render_main_content(matrix, calc_type):
+    """渲染主内容区"""
+    
+    # 4个Tab
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📝 矩阵编辑", "🔢 计算过程", "📊 可视化", "📤 导出"
+    ])
+    
+    with tab1:
+        render_matrix_editor(matrix)
+    
+    with tab2:
+        if 'last_result' in st.session_state:
+            render_calculation_process(st.session_state.last_result)
+        else:
+            st.info("💡 请先进行计算")
+    
+    with tab3:
+        if 'last_result' in st.session_state:
+            render_visualization(st.session_state.last_result)
+        else:
+            st.info("💡 请先进行计算")
+    
+    with tab4:
+        if 'last_result' in st.session_state:
+            render_export(st.session_state.last_result)
+        else:
+            st.info("💡 请先进行计算")
+
+def render_matrix_editor(matrix):
+    """渲染矩阵编辑器"""
+    if matrix is None:
+        st.info("💡 请在侧边栏输入矩阵")
+        return
+    
+    st.subheader("📊 当前矩阵")
+    
+    # 矩阵显示
+    df = pd.DataFrame(matrix)
+    st.dataframe(df, use_container_width=True, height=min(400, len(matrix) * 50))
+    
+    # 矩阵属性
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("维度", f"{matrix.shape[0]}×{matrix.shape[1]}")
+    with col2:
+        try:
+            cond = np.linalg.cond(matrix)
+            st.metric("条件数", f"{cond:.2e}")
+        except:
+            st.metric("条件数", "N/A")
+    with col3:
+        try:
+            rank = np.linalg.matrix_rank(matrix)
+            st.metric("秩", rank)
+        except:
+            st.metric("秩", "N/A")
+    with col4:
+        is_square = matrix.shape[0] == matrix.shape[1]
+        st.metric("方阵", "✓" if is_square else "✗")
+    
+    # 矩阵操作
+    st.markdown("#### 🛠️ 快速操作")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        if st.button("🔄 转置"):
+            st.session_state.random_matrix = matrix.T
+            st.rerun()
+    with col2:
+        if st.button("➕ 加单位矩阵"):
+            if matrix.shape[0] == matrix.shape[1]:
+                st.session_state.random_matrix = matrix + np.eye(matrix.shape[0])
+                st.rerun()
+    with col3:
+        if st.button("✖️ 乘2"):
+            st.session_state.random_matrix = matrix * 2
+            st.rerun()
+    with col4:
+        if st.button("🎲 随机扰动"):
+            noise = np.random.randn(*matrix.shape) * 0.1
+            st.session_state.random_matrix = matrix + noise
+            st.rerun()
+
+def render_calculation_process(result):
+    """渲染计算过程"""
+    st.subheader("🔢 详细计算过程")
+    
+    if 'determinant' in result:
+        det = result['determinant']
+        st.markdown(f"### 📊 行列式计算结果")
+        st.latex(f"\\det(A) = {det.get('value', 'N/A')}")
+        
+        if 'steps' in det:
+            st.markdown("#### 📝 LU分解步骤")
+            for i, step in enumerate(det['steps'][:10]):  # 最多显示10步
+                with st.expander(f"步骤 {i+1}: {step.get('description', '计算')}", expanded=i==0):
+                    if 'matrix' in step:
+                        st.dataframe(pd.DataFrame(step['matrix']), use_container_width=True)
+                    if 'formula' in step:
+                        st.latex(step['formula'])
+    
+    if 'inverse' in result and result['inverse']:
+        inv = result['inverse']
+        st.markdown(f"### 🔄 逆矩阵计算结果")
+        st.latex("A^{-1} = ")
+        st.dataframe(pd.DataFrame(inv.get('matrix', [])), use_container_width=True)
+    
+    if 'eigenvalues' in result and result['eigenvalues']:
+        eigen = result['eigenvalues']
+        st.markdown(f"### ⚡ 特征值计算结果")
+        values = eigen.get('values', [])
+        for i, val in enumerate(values):
+            st.latex(f"\\lambda_{{{i+1}}} = {val:.6f}")
+    
+    if 'solution' in result:
+        sol = result['solution']
+        st.markdown(f"### 📐 线性方程组求解结果")
+        st.latex("x = ")
+        st.dataframe(pd.DataFrame(sol.get('x', [])), use_container_width=True)
+
+def render_visualization(result):
+    """渲染可视化"""
+    st.subheader("📊 可视化展示")
+    
+    if 'determinant' in result:
+        det = result['determinant']
+        if 'intermediate_states' in det:
+            fig = plot_matrix_heatmap(det['intermediate_states'])
+            st.plotly_chart(fig, use_container_width=True)
+    
+    if 'eigenvalues' in result and result['eigenvalues']:
+        eigen = result['eigenvalues']
+        if result['matrix'].shape == (2, 2):
+            fig = plot_eigenvalue_geometry(
+                eigen.get('values', []),
+                eigen.get('vectors', [])
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # 收敛曲线
+        if 'convergence' in eigen:
+            fig = plot_convergence_curve(eigen['convergence'])
+            st.plotly_chart(fig, use_container_width=True)
+
+def render_export(result):
+    """渲染导出功能"""
+    st.subheader("📤 导出选项")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("#### 📝 LaTeX报告")
+        latex_content = generate_latex_report(result)
+        st.download_button(
+            "下载LaTeX",
+            latex_content,
+            f"matrixvis_report_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.tex",
+            mime="text/x-tex"
+        )
+    
+    with col2:
+        st.markdown("#### 📊 JSON数据")
+        json_content = json.dumps(result, default=str, indent=2, ensure_ascii=False)
+        st.download_button(
+            "下载JSON",
+            json_content,
+            f"matrixvis_data_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json"
+        )
+    
+    with col3:
+        st.markdown("#### 📋 CSV矩阵")
+        if 'matrix' in result:
+            csv_content = pd.DataFrame(result['matrix']).to_csv(index=False)
+            st.download_button(
+                "下载CSV",
+                csv_content,
+                f"matrix_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+    
+    # 历史记录
+    st.divider()
+    st.markdown("#### 📚 计算历史")
+    if st.session_state.history:
+        for i, h in enumerate(reversed(st.session_state.history[-10:])):
+            with st.expander(f"记录 {len(st.session_state.history)-i}: {h['timestamp'].strftime('%H:%M:%S')}"):
+                st.json(h, expanded=False)
+
+def render_learning_mode():
+    """渲染AI学习模式"""
+    st.markdown("---")
+    st.title("🎓 AI智能学习模式")
+    
+    # 用户习惯分析
+    if st.session_state.history:
+        smart_tutor_mode(st.session_state.history)
+    
+    # 知识图谱
+    st.subheader("🗺️ 知识图谱导航")
+    G = st.session_state.knowledge_graph
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        fig = visualize_knowledge_graph(G)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        st.markdown("#### 📚 推荐学习路径")
+        if st.session_state.history:
+            path = recommend_learning_path(st.session_state.history, G)
+            for i, node in enumerate(path):
+                st.write(f"{i+1}. {G.nodes[node].get('name', node)}")
+    
+    # 知识点详情
+    st.markdown("#### 📖 知识点详情")
+    selected_concept = st.selectbox(
+        "选择知识点",
+        list(G.nodes()),
+        format_func=lambda x: G.nodes[x].get('name', x)
+    )
+    
+    if selected_concept:
+        node_data = G.nodes[selected_concept]
+        st.info(f"**{node_data.get('name', selected_concept)}**\n\n{node_data.get('description', '暂无描述')}")
+        
+        # 前置知识
+        predecessors = list(G.predecessors(selected_concept))
+        if predecessors:
+            st.markdown("**前置知识：**")
+            for pred in predecessors:
+                st.write(f"- {G.nodes[pred].get('name', pred)}")
+
+def main():
+    """主函数"""
+    render_header()
+    
+    # 检查是否显示学习模式
+    if st.session_state.get('show_learning_mode', False):
+        render_learning_mode()
+        if st.button("⬅️ 返回计算模式"):
+            st.session_state.show_learning_mode = False
+            st.rerun()
+        return
+    
+    # 正常模式
+    matrix, calc_type = render_sidebar()
+    render_main_content(matrix, calc_type)
+    
+    # 页脚
+    st.divider()
+    st.caption("🔢 MatrixVis v1.0.0 | 海南师范大学参赛团队 | 2025中国大学生计算机设计大赛")
+
+if __name__ == "__main__":
+    main()
